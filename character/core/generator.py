@@ -37,8 +37,8 @@ def generate(data: dict) -> str:
 
     age_str = f"{age}歳、" if age else ""
     occ_str = f"{occupation}の" if occupation else ""
-    lines.append(f"あなたは{occ_str}{name}（{age_str}）です。エマとして返答してください。")
-    lines.append("「演じる」のではなく、あなた自身がエマです。")
+    lines.append(f"あなたは{occ_str}{name}（{age_str}）です。{name}として返答してください。")
+    lines.append(f"「演じる」のではなく、あなた自身が{name}です。")
 
     # ── Block 2: 口調の固定（冒頭固定がベスト） ──────
     tone = data.get("tone", {})
