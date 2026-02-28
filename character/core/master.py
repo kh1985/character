@@ -7,8 +7,10 @@ from __future__ import annotations
 import re
 import subprocess
 import yaml
+from pydantic import ValidationError
 
-# ── マスターAIへの指示（内部プロンプト）──────────────────────────────
+from character.core.schema import CharacterSheet
+
 MASTER_SYSTEM_PROMPT = """あなたはキャラクター設計の専門家です。
 ユーザーの指示を受け取り、キャラクターのYAMLファイルを生成します。
 
@@ -37,6 +39,10 @@ personality:
   - "（もう1つ）"
   - "（もう1つ）"
 
+reactions:
+  褒められたとき: "（反応の説明）"
+  怒ったとき: "（反応の説明）"
+
 forbidden:
   - "やってはいけない言動を1つ"
   - "（もう1つ）"
@@ -53,52 +59,70 @@ context:
 - 名前は日本人らしいものにする"""
 
 
-def generate_characters(instruction: str) -> list[dict]:
+def generate_characters(instruction: str) -> list[CharacterSheet]:
     """
     自然言語の指示からキャラクターのリストを生成して返す。
-    claude CLI を使って生成するため、APIキー設定不要。
-
-    Args:
-        instruction: 「ギャルゲーのテストプレイヤーを10人、現代日本人男性で」など
 
     Returns:
-        キャラクターのdictリスト
+        バリデーション済みの CharacterSheet リスト
+    Raises:
+        RuntimeError: claude CLI の実行に失敗した場合
+        ValueError: 有効なキャラクターが1件も生成できなかった場合
     """
     full_prompt = f"{MASTER_SYSTEM_PROMPT}\n\n---\n\n{instruction}"
 
-    # CLAUDECODE環境変数があるとネスト禁止エラーになるため除外して実行
     env = {k: v for k, v in __import__("os").environ.items() if k != "CLAUDECODE"}
 
-    result = subprocess.run(
-        ["claude", "-p", full_prompt],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            ["claude", "-p", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("claude コマンドが見つかりません。Claude Code CLIがインストールされているか確認してください。")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("生成がタイムアウトしました（120秒）。指示を短くするか、人数を減らして試してください。")
 
     if result.returncode != 0:
-        raise RuntimeError(f"claude CLI エラー:\n{result.stderr}")
+        raise RuntimeError(f"claude CLI の実行に失敗しました:\n{result.stderr}")
 
-    return _parse_yaml_blocks(result.stdout)
+    raw_dicts = _parse_yaml_blocks(result.stdout)
+
+    if not raw_dicts:
+        raise ValueError("YAMLブロックをひとつも抽出できませんでした。出力を確認してください。")
+
+    # バリデーション：成功分だけ返し、失敗分は警告
+    characters: list[CharacterSheet] = []
+    for i, d in enumerate(raw_dicts, 1):
+        try:
+            characters.append(CharacterSheet.from_dict(d))
+        except ValidationError as e:
+            name = d.get("name", f"#{i}")
+            print(f"  ⚠️  [{name}] バリデーション失敗（スキップ）: {e.errors()[0]['msg']}")
+
+    if not characters:
+        raise ValueError("有効なキャラクターを1件も生成できませんでした。")
+
+    return characters
 
 
 def _parse_yaml_blocks(text: str) -> list[dict]:
-    """レスポンスからYAMLブロックを抽出してパースする"""
-    # ```yaml ... ``` ブロックを全部抽出
+    """レスポンスから ```yaml ... ``` ブロックを抽出してパースする"""
     blocks = re.findall(r"```yaml\s*(.*?)```", text, re.DOTALL)
 
     if not blocks:
-        # ブロックがなければ --- 区切りで分割を試みる
         blocks = [b.strip() for b in text.split("---") if b.strip()]
 
-    characters = []
+    results = []
     for block in blocks:
         try:
             parsed = yaml.safe_load(block)
             if isinstance(parsed, dict) and "name" in parsed:
-                characters.append(parsed)
-        except yaml.YAMLError:
-            continue
+                results.append(parsed)
+        except yaml.YAMLError as e:
+            print(f"  ⚠️  YAMLパースエラー（スキップ）: {e}")
 
-    return characters
+    return results
